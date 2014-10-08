@@ -1,0 +1,283 @@
+var currentCompiler = null;
+var allCompilers = [];
+
+function getSource() {
+    var source = $('.source').val();
+    if (source == "browser") {
+        if (window.localStorage['files'] == undefined) window.localStorage['files'] = "{}";
+        return {
+            list: function(callback) {
+                var files = JSON.parse(window.localStorage['files']);
+                callback($.map(files, function(val, key) { return val; }));
+            },
+            load: function(name, callback) {
+                var files = JSON.parse(window.localStorage['files']);
+                callback(files[name]);
+            },
+            save: function(obj, callback) {
+                var files = JSON.parse(window.localStorage['files']);
+                files[obj.name] = obj;
+                window.localStorage['files'] = JSON.stringify(files);
+                callback(true);
+            }
+        };
+    } else {
+        var base = "/source/" + source;
+        return {
+            list: function(callback) { $.getJSON(base + "/list", callback); },
+            load: function(name, callback) { $.getJSON(base + "/load/" + name, callback); },
+            save: function(obj, callback) { alert("Coming soon..."); }
+        };
+    }
+}
+
+var currentFileList = {};
+function updateFileList() {
+    getSource().list(function(results) {
+        currentFileList = {};
+        $('.filename option').remove();
+        $.each(results, function(index, arg) {
+            currentFileList[arg.name] = arg;
+            $('.filename').append($('<option value="' + arg.urlpart + '">' + arg.name + '</option>'));
+            if (window.localStorage['filename'] == arg.urlpart) $('.filename').val(arg.urlpart);
+        });
+    });
+}
+
+function onSourceChange() {
+    updateFileList();
+    window.localStorage['source'] = $('.source').val();
+}
+
+function loadFile() {
+    var name = $('.filename').val();
+    window.localStorage['filename'] = name;
+    getSource().load(name, function(results) {
+        if (results.file) {
+            currentCompiler.setSource(results.file);
+        } else {
+            // TODO: error?
+            console.log(results);
+        }
+    });
+}
+
+function saveFile() {
+    saveAs($('.files .filename').val());
+}
+
+function saveAs(filename) {
+    var prevFilename = window.localStorage['filename'] || "";
+    if (filename != prevFilename && currentFileList[filename]) {
+        // TODO!
+        alert("Coming soon - overwriting files");
+        return;
+    }
+    var obj = { urlpart: filename, name: filename, file: currentCompiler.getSource() };
+    getSource().save(obj, function(ok) {
+        if (ok) {
+            window.localStorage['filename'] = filename;
+            updateFileList();
+        }
+    });
+}
+
+function saveFileAs() {
+    $('#saveDialog').modal();
+    $('#saveDialog .save-filename').val($('.files .filename').val());
+    $('#saveDialog .save-filename').focus();
+    function onSave() {
+        $('#saveDialog').modal('hide');
+        saveAs($('#saveDialog .save-filename').val());
+    };
+    $('#saveDialog .save').click(onSave);
+    $('#saveDialog .save-filename').keyup(function(event) {
+        if (event.keyCode == 13) onSave();
+    });
+}
+
+function loadUrlShortenerApi() {
+    gapi.client.load('urlshortener', 'v1', makePermalink);
+}
+
+function loadGoogleApisClientLibrary() {
+    $(document.body).append('<script src="https://apis.google.com/js/client.js?onload=loadUrlShortenerApi">');
+}
+
+function makePermalink() {
+    $('#permalink').val('');
+    if (!gapi.client) {
+        // Load the Google APIs client library asynchronously, then the
+        // urlshortener API, and finally come back here.
+        loadGoogleApisClientLibrary();
+        return;
+    }
+    var request = gapi.client.urlshortener.url.insert({
+        resource: {
+            longUrl: window.location.href.split('#')[0] + '#' + serialiseState(),
+        }
+    });
+    request.execute(function(response) {
+        $('#permalink').val(response.id);
+    });
+}
+
+function hidePermalink() {
+    if ($('.files .permalink').hasClass('active')) {  // do nothing if already hidden.
+        togglePermalink();
+    }
+}
+
+function togglePermalink() {
+    if (!$('.files .permalink').hasClass('active')) {
+        $('.files .permalink').addClass('active');
+        $('.files .permalink-collapse').collapse('show');
+        makePermalink();
+    } else {
+        $('.files .permalink-collapse').collapse('hide');
+        $('.files .permalink').removeClass('active');
+    }
+}
+
+function serialiseState() {
+    var state = {
+        version: 3,
+        filterAsm: getAsmFilters(),
+        compilers: $.map(allCompilers, function(compiler) { return compiler.serialiseState(); })
+    };
+    return encodeURIComponent(JSON.stringify(state));
+}
+
+function deserialiseState(state) {
+    try {
+        state = $.parseJSON(decodeURIComponent(state));
+        switch (state.version) {
+        case 1:
+            state.filterAsm = {};
+            // falls into
+        case 2:
+            state.compilers = [state];
+            // falls into
+        case 3:
+            break;
+        default:
+            return false;
+        }
+    } catch (ignored) { return false; }
+    setFilterUi(state.filterAsm);
+    for (var i = 0; i < Math.min(allCompilers.length, state.compilers.length); i++) {
+        allCompilers[i].deserialiseState(state.compilers[i]);
+    }
+    return true;
+}
+
+function initialise() {
+    var defaultFilters = JSON.stringify(getAsmFilters());
+    var actualFilters = $.parseJSON(window.localStorage['filter'] || defaultFilters);
+    setFilterUi(actualFilters);
+
+    // Synchronous request here to make the whole race condition problem of
+    // getting language and compiler options after we've set local overrides.
+    var languageType = "text/x-c++src";
+    $.ajax({
+        url: "/info",
+        dataType: "json",
+        async: false,
+        success: function(results) {
+            $(".language-name").text(results.language);
+            if (results.language == "Rust") {
+                languageType = "text/x-rustsrc";
+            } else if (results.language == "D") {
+                languageType = "text/x-d";
+            }
+            $(".compiler_options").val(results.options);
+        }
+    }); // must be ahead of the compiler creation. This is all terrible.
+
+    var compiler = new Compiler($('body'), actualFilters, "a", function() {
+        hidePermalink();
+    }, languageType);
+    allCompilers.push(compiler);
+    currentCompiler = compiler;
+
+    $('form').submit(function() { return false; });
+    $('.files .source').change(onSourceChange);
+    $.getJSON("/compilers", function(results) {
+        compilersByExe = {};
+        $.each(results, function(index, arg) {
+            compilersByExe[arg.exe] = arg;
+        });
+        compiler.setCompilers(results);
+    });
+    $.getJSON("/sources", function(results) {
+        $('.source option').remove();
+        $.each(results, function(index, arg) {
+            $('.files .source').append($('<option value="' + arg.urlpart + '">' + arg.name + '</option>'));
+            if (window.localStorage['source'] == arg.urlpart) {
+                $('.files .source').val(arg.urlpart);
+            }
+        });
+        onSourceChange();
+    });
+    $('.files .load').click(function() {
+        loadFile();
+        return false;
+    });
+    $('.files .save').click(function() {
+        saveFile();
+        return false;
+    });
+    $('.files .saveas').click(function() {
+        saveFileAs();
+        return false;
+    });
+    $('.files .permalink').click(function(e) {
+        togglePermalink(e);
+        return false;
+    });
+    
+    $('.filter button.btn').click(function(e) {
+        $(e.target).toggleClass('active');
+        var filters = getAsmFilters();
+        window.localStorage['filter'] = JSON.stringify(filters);
+        currentCompiler.setFilters(filters);
+    });
+
+    function loadFromHash() {
+        deserialiseState(window.location.hash.substr(1));
+    }
+
+    $(window).bind('hashchange', function() {
+        loadFromHash();
+    });
+    loadFromHash();
+
+    function resizeEditors() {
+        var codeMirrors = $('.CodeMirror');
+        var top = codeMirrors.position().top;
+        var windowHeight = $(window).height();
+        var compOutputSize = Math.max(100, windowHeight * 0.05);
+        $('.output').height(compOutputSize);
+        var resultHeight = $('.result').height();
+        var height = windowHeight - top - resultHeight - 40;
+        currentCompiler.setEditorHeight(height);
+    }
+    $(window).on("resize", resizeEditors);
+    resizeEditors();
+}
+
+function getAsmFilters() {
+    var asmFilters = {};
+    $('.filter button.btn.active').each(function() {
+        asmFilters[$(this).val()] = true;
+    });
+    return asmFilters;
+}
+
+function setFilterUi(asmFilters) {
+    $('.filter button.btn').each(function() {
+        $(this).toggleClass('active', !!asmFilters[$(this).val()]);
+    });
+}
+
+$(initialise);
