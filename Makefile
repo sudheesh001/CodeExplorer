@@ -45,3 +45,8 @@ run-amazon: node_modules optional-d-support c-preload
 run-amazon-d: node_modules optional-d-support c-preload
 	./node_modules/.bin/supervisor -- ./app.js --env amazon-d
 
+run-azure: node_modules optional-d-support c-preload
+	./node_modules/.bin/supervisor -- ./app.js --env azure
+
+run-azure-d: node_modules optional-d-support c-preload
+	./node_modules/.bin/supervistor -- ./app.js --env azure-d
